@@ -991,6 +991,13 @@ const TEAMS = {
 
 const STORAGE_KEY = 'rapidfire_spiff_v6';
 
+// ===== BACKEND API =====
+// Points to the same server that serves this HTML file
+const API = '/api';
+let _pollInterval = null;
+let _lastUpdated = '';
+let _saving = false;
+
 function defaultState(){
   return {
     regions: {
@@ -1001,23 +1008,81 @@ function defaultState(){
     repStats: {}
   };
 }
+
 function loadState(){
+  // Seed from localStorage while we wait for the server response
   try { const r = localStorage.getItem(STORAGE_KEY); if(r) return JSON.parse(r); } catch(e){}
   return defaultState();
 }
-function saveState(){
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify({regions:state, repStats})); flashSaved(); } catch(e){}
+
+async function saveState(){
+  // Always mirror to localStorage as instant fallback
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify({regions:state, repStats})); } catch(e){}
+
+  _saving = true;
+  try {
+    const resp = await fetch(API + '/state', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({regions: state, repStats})
+    });
+    const data = await resp.json();
+    if (data.lastUpdated) _lastUpdated = data.lastUpdated;
+    flashSaved();
+  } catch(e) {
+    // Server unreachable — still saved to localStorage
+    flashSaved('✓ LOCAL');
+  }
+  _saving = false;
 }
-function flashSaved(){
+
+async function loadFromServer() {
+  try {
+    const resp = await fetch(API + '/state');
+    const data = await resp.json();
+    // Only apply if server has newer data than what we last wrote
+    if (data.lastUpdated && data.lastUpdated === _lastUpdated) return;
+    _lastUpdated = data.lastUpdated || '';
+    // Merge server state into local objects
+    if (data.regions) {
+      ['east','south','west'].forEach(r => {
+        if (data.regions[r]) {
+          state[r].runs  = data.regions[r].runs  || 0;
+          state[r].bases = (data.regions[r].bases || [null,null,null]);
+          state[r].plays = data.regions[r].plays  || [];
+        }
+      });
+    }
+    if (data.repStats) {
+      for (const k in repStats) delete repStats[k];
+      Object.assign(repStats, data.repStats || {});
+    }
+    renderAll();
+    flashSaved('● LIVE');
+  } catch(e) {
+    // Server unreachable — silently stay on local state
+  }
+}
+
+function startPolling() {
+  // Load immediately on page load, then every 8 seconds
+  loadFromServer();
+  _pollInterval = setInterval(loadFromServer, 8000);
+}
+
+function flashSaved(msg) {
   const el = document.getElementById('save-indicator');
-  el.textContent = '✓ SAVED'; el.classList.add('saved');
+  el.textContent = msg || '✓ SAVED'; el.classList.add('saved');
   clearTimeout(el._t);
-  el._t = setTimeout(()=>{ el.textContent='● AUTO-SAVED'; el.classList.remove('saved'); }, 1800);
+  el._t = setTimeout(()=>{ el.textContent='● LIVE'; el.classList.remove('saved'); }, 1800);
 }
 
 const saved = loadState();
 const state = saved.regions;
 const repStats = saved.repStats;
+
+// Start polling after page loads
+window.addEventListener('load', startPolling);
 
 // ===== DRAW DIAMOND =====
 function helmetSVG(cx, cy, name, rc) {
